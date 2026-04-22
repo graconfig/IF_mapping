@@ -1,209 +1,260 @@
+"""按项目配置 (config.yaml) 从一份接口设计书 Excel 抽取字段映射记录。
+
+用法：
+  python3 scripts/extract_mapping.py --config projects/<name>/config.yaml <xlsx 路径> [--out <jsonl>]
+
+输出字段统一使用 external_* / sap_* —— 抽取器根据 config.target_side 判定哪一侧是 SAP。
 """
-从一份 SAP 接口设计书 (インタフェース項目定義書 .xlsx) 中抽取
-項目マッピング(受信) 与 項目マッピング(返信) 两张工作表，
-把每一行字段映射规范化为一条 JSON 记录，输出到 JSONL。
-
-设计约定
---------
-- 工作表统一为 23 列；从第 6 行 (0-based index=5 是表头，=6 起为数据) 开始读。
-- 左块  列 0..5    : №/項目名称/構造/技術名称/文字数/属性
-- 中间  列 6..9    : №/変換仕様/I-O/現行編集仕様
-- 右块  列 10..15  : №/項目名称/構造/技術名称/文字数/属性
-- 右尾  列 17..22  : 桁数/コード体系/補足/No./分類/備考
-
-方向识别（SAP 在哪一侧）
------------------------
-- 受信 sheet: SAP 通常在右侧 (連携元=外部、連携先=部品SAP)
-- 返信 sheet: SAP 通常在左侧 (連携元=部品SAP、連携先=外部)
-不依赖工作表表头文字（模板里有残留），改为根据 "構造" 列内容：
-含有 VBAK/VBAP/VBEP/ADRC/MBEW/MAKT/PRCD_ELEMENTS 等大写 SAP 表名样式即判为 SAP 侧。
-若两侧都像/都不像，回退到 sheet 名推断。
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
 import re
 import sys
+import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import openpyxl
+import yaml
 
-MAPPING_SHEETS = {"項目マッピング(受信)": "inbound", "項目マッピング(返信)": "outbound"}
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-# SAP 表名样式：3-6 位大写字母(可含下划线/数字)。用于判断哪一侧是 SAP。
-SAP_STRUCT_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+SEMANTIC_ORDER = ("no", "name", "struct", "tech", "length", "type")
 
 
-def _norm(v: Any) -> str:
+def load_config(path: str | Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _clean(v: Any) -> Any:
     if v is None:
-        return ""
-    s = str(v).strip()
-    return s
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        return s or None
+    return v
 
 
-def _looks_like_sap_struct(s: str) -> bool:
-    if not s:
+def _match_semantic(cell_text: str | None, vocab: list[str]) -> bool:
+    if not cell_text:
         return False
-    # 允许多行（同一行映射到多个 SAP 字段的情况，如 "ADRC\nADRC"）
-    parts = [p.strip() for p in re.split(r"[\n,、/]+", s) if p.strip()]
-    if not parts:
-        return False
-    return all(bool(SAP_STRUCT_RE.match(p)) for p in parts)
+    t = str(cell_text).strip()
+    return any(t == w for w in vocab)
 
 
-def _extract_header(ws) -> dict[str, str]:
-    """从 sheet 头部读 IFID / IF 名称。"""
-    ifid = _norm(ws.cell(row=2, column=1).value)
-    if_name = _norm(ws.cell(row=2, column=3).value)
-    return {"ifid": ifid, "if_name": if_name}
+def _semantic_for_cell(cell_text: str | None, field_semantics: dict[str, list[str]]) -> str | None:
+    """返回该 cell 文本命中的语义 key；不命中则 None。"""
+    if not cell_text:
+        return None
+    t = str(cell_text).strip()
+    for sem, vocab in field_semantics.items():
+        if t in vocab:
+            return sem
+    return None
 
 
-def _row_cells(row: tuple) -> list[str]:
-    return [_norm(c) for c in row]
+def _find_field_blocks(ws, config: dict) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    """扫描 header_row，找两个连续 6 列的语义块 (no,name,struct,tech,length,type)。"""
+    header_row = config["mapping_sheet"]["header_row"]
+    semantics = config["field_semantics"]
+    max_col = ws.max_column
+    # 遍历每个起点，尝试匹配完整序列
+    cell_sems = [
+        _semantic_for_cell(ws.cell(row=header_row, column=c).value, semantics)
+        for c in range(1, max_col + 1)
+    ]
+    blocks: list[tuple[int, ...]] = []
+    c = 0
+    while c < max_col - 5:
+        # cell_sems[c] 对应列 c+1
+        if cell_sems[c] == SEMANTIC_ORDER[0]:  # "no"
+            seq = cell_sems[c:c + 6]
+            if tuple(seq) == SEMANTIC_ORDER:
+                blocks.append(tuple(range(c + 1, c + 7)))
+                c += 6
+                continue
+        c += 1
+    if len(blocks) >= 2:
+        return blocks[0], blocks[1]
+    return None
 
 
-def _parse_mapping_sheet(ws, sheet_kind: str) -> list[dict]:
-    """
-    sheet_kind: 'inbound' (受信) | 'outbound' (返信)
-    """
-    head = _extract_header(ws)
-    records: list[dict] = []
+def _find_aux_cols(ws, config: dict) -> dict[str, int | None]:
+    """按 aux_columns 配置，在 row=label_row 和 header_row 扫描关键字，找列号。"""
+    label_row = config["mapping_sheet"]["label_row"]
+    header_row = config["mapping_sheet"]["header_row"]
+    aux_cfg = config.get("aux_columns", {})
+    result: dict[str, int | None] = {k: None for k in aux_cfg}
+    max_col = ws.max_column
+    for c in range(1, max_col + 1):
+        t5 = _clean(ws.cell(row=label_row, column=c).value)
+        t6 = _clean(ws.cell(row=header_row, column=c).value)
+        joined = " ".join(str(x) for x in (t5, t6) if x)
+        for key, vocab in aux_cfg.items():
+            if result[key] is not None:
+                continue
+            # 精确或包含匹配：row6 精确，或联合文本包含
+            if t6 and str(t6).strip() in vocab:
+                result[key] = c
+            elif any(v in joined for v in vocab):
+                result[key] = c
+    return result
 
-    for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
-        if r_idx <= 6:  # 前 6 行是表头/元信息
+
+def _detect_sap_side(
+    ws, left_cols: tuple[int, ...], right_cols: tuple[int, ...], config: dict
+) -> tuple[str, str]:
+    """判定 SAP 在哪一侧。返回 (sap_side, counterpart_name)。sap_side ∈ {"left","right"}。"""
+    label_row = config["mapping_sheet"]["label_row"]
+    patterns = [re.compile(p, re.IGNORECASE) for p in config["target_side"]["label_patterns"]]
+
+    # 左侧 label: col=1；右侧 label: col=right_cols[0]
+    left_label = _clean(ws.cell(row=label_row, column=1).value) or ""
+    right_label = _clean(ws.cell(row=label_row, column=right_cols[0]).value) or ""
+
+    left_hit = any(p.search(left_label) for p in patterns)
+    right_hit = any(p.search(right_label) for p in patterns)
+
+    if left_hit and not right_hit:
+        return "left", right_label or "(unknown)"
+    if right_hit and not left_hit:
+        return "right", left_label or "(unknown)"
+    # 两侧都命中或都不命中：启发式降级，默认右为 SAP
+    if right_hit:
+        return "right", left_label or "(unknown)"
+    if left_hit:
+        return "left", right_label or "(unknown)"
+    return "right", left_label or right_label or "(unknown)"
+
+
+def _infer_direction(sheet_name: str, file_name: str, sap_side: str, config: dict) -> str:
+    rules = config.get("direction_rules", {})
+    for marker, direction in (rules.get("sheet_suffix") or {}).items():
+        if marker in sheet_name:
+            return direction
+    for marker, direction in (rules.get("file_marker") or {}).items():
+        if marker in file_name:
+            return direction
+    if rules.get("fallback_by_sap_side", True):
+        if sap_side == "left":
+            return "sap_to_external"
+        if sap_side == "right":
+            return "external_to_sap"
+    return "unknown"
+
+
+def _pack_side(ws, r: int, cols: tuple[int, ...]) -> dict[str, Any]:
+    keys = ("no", "name", "struct", "tech", "len", "attr")
+    return {k: _clean(ws.cell(row=r, column=c).value) for k, c in zip(keys, cols)}
+
+
+def _row_is_empty(ws, r: int, watched_cols: list[int]) -> bool:
+    return all(_clean(ws.cell(row=r, column=c).value) is None for c in watched_cols)
+
+
+def extract_sheet(ws, source_file: str, config: dict) -> list[dict[str, Any]]:
+    blocks = _find_field_blocks(ws, config)
+    if blocks is None:
+        return []
+    left_cols, right_cols = blocks
+    aux = _find_aux_cols(ws, config)
+    sap_side, counterpart = _detect_sap_side(ws, left_cols, right_cols, config)
+
+    label_row = config["mapping_sheet"]["label_row"]
+    ifid_rc = config["if_meta"]["ifid_cell"]
+    name_rc = config["if_meta"]["if_name_cell"]
+    ifid = _clean(ws.cell(row=ifid_rc[0], column=ifid_rc[1]).value)
+    if_name = _clean(ws.cell(row=name_rc[0], column=name_rc[1]).value)
+    sap_label = _clean(
+        ws.cell(row=label_row, column=right_cols[0] if sap_side == "right" else 1).value
+    )
+    direction = _infer_direction(ws.title, source_file, sap_side, config)
+
+    sap_cols = right_cols if sap_side == "right" else left_cols
+    ext_cols = left_cols if sap_side == "right" else right_cols
+
+    watched = list(left_cols) + list(right_cols) + [v for v in aux.values() if v]
+    data_start = config["mapping_sheet"]["data_start_row"]
+
+    records: list[dict[str, Any]] = []
+    for r in range(data_start, ws.max_row + 1):
+        if _row_is_empty(ws, r, watched):
             continue
-        c = _row_cells(row)
-        # 保证列数
-        while len(c) < 23:
-            c.append("")
+        ext = _pack_side(ws, r, ext_cols)
+        sap = _pack_side(ws, r, sap_cols)
 
-        left = {
-            "no": c[0],
-            "name": c[1],
-            "struct": c[2],
-            "tech_name": c[3],
-            "length": c[4],
-            "attr": c[5],
-        }
-        middle = {
-            "no_ref": c[6],
-            "conversion_spec": c[7],
-            "io": c[8],
-            "current_spec": c[9],
-        }
-        right = {
-            "no": c[10],
-            "name": c[11],
-            "struct": c[12],
-            "tech_name": c[13],
-            "length": c[14],
-            "attr": c[15],
-        }
-        tail = {
-            "digits": c[17],
-            "code_system": c[18],
-            "note": c[19],
-            "adj_no": c[20],
-            "adj_class": c[21],
-            "adj_remark": c[22],
-        }
+        def _aux(key: str):
+            col = aux.get(key)
+            return _clean(ws.cell(row=r, column=col).value) if col else None
 
-        # 过滤全空行
-        if not any(left.values()) and not any(right.values()) and not any(middle.values()):
-            continue
-
-        # 判定 SAP 侧
-        left_is_sap = _looks_like_sap_struct(left["struct"])
-        right_is_sap = _looks_like_sap_struct(right["struct"])
-        if left_is_sap and not right_is_sap:
-            sap_side, ext_side, sap_pos = left, right, "left"
-        elif right_is_sap and not left_is_sap:
-            sap_side, ext_side, sap_pos = right, left, "right"
-        else:
-            # 回退：受信默认 SAP 在右，返信默认 SAP 在左
-            if sheet_kind == "inbound":
-                sap_side, ext_side, sap_pos = right, left, "right"
-            else:
-                sap_side, ext_side, sap_pos = left, right, "left"
-
-        record = {
-            "ifid": head["ifid"],
-            "if_name": head["if_name"],
-            "direction": sheet_kind,  # inbound=外部→SAP; outbound=SAP→外部
-            "row_no": r_idx,
-            "external_no": ext_side["no"],
-            "external_name": ext_side["name"],
-            "external_struct": ext_side["struct"],
-            "external_tech_name": ext_side["tech_name"],
-            "external_length": ext_side["length"],
-            "external_attr": ext_side["attr"],
-            "sap_no": sap_side["no"],
-            "sap_name": sap_side["name"],
-            "sap_struct": sap_side["struct"],
-            "sap_tech_name": sap_side["tech_name"],
-            "sap_length": sap_side["length"],
-            "sap_attr": sap_side["attr"],
-            "sap_side_pos": sap_pos,  # left|right — 便于回溯原表
-            "conversion_spec": middle["conversion_spec"],
-            "io": middle["io"],
-            "current_spec": middle["current_spec"],
-            "code_system": tail["code_system"],
-            "digits": tail["digits"],
-            "note": tail["note"],
-            "adj_remark": tail["adj_remark"],
-            # 当本行未明确映射到 SAP 字段时标记
-            "has_sap_mapping": bool(sap_side["struct"] and sap_side["tech_name"]),
+        rec = {
+            "source_file": source_file,
+            "sheet": ws.title,
+            "row_idx": r,
+            "ifid": ifid,
+            "if_name": if_name,
+            "counterpart_system": counterpart,
+            "sap_side_label": sap_label,
+            "sap_side": sap_side,
+            "direction": direction,
+            "ext_no": ext["no"], "ext_name": ext["name"], "ext_struct": ext["struct"],
+            "ext_tech": ext["tech"], "ext_len": ext["len"], "ext_attr": ext["attr"],
+            "sap_no": sap["no"], "sap_name": sap["name"], "sap_struct": sap["struct"],
+            "sap_tech": sap["tech"], "sap_len": sap["len"], "sap_attr": sap["attr"],
+            "conv_spec":    _aux("conv_spec"),
+            "conv_current": _aux("conv_current"),
+            "sap_digits":   _aux("sap_digits"),
+            "sap_code_system": _aux("sap_code_system"),
+            "sap_supplement":  _aux("sap_supplement"),
+            "unrealizable_no":    _aux("unrealizable_no"),
+            "unrealizable_class": _aux("unrealizable_class"),
+            "remark":       _aux("remark"),
         }
-        records.append(record)
-
+        records.append(rec)
     return records
 
 
-def extract_file(path: Path) -> list[dict]:
-    wb = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
-    all_records: list[dict] = []
-    for sheet_name, kind in MAPPING_SHEETS.items():
-        if sheet_name not in wb.sheetnames:
+def extract_file(path: Path, config: dict) -> list[dict[str, Any]]:
+    wb = openpyxl.load_workbook(path, data_only=True)
+    sheet_re = re.compile(config["mapping_sheet"]["name_regex"])
+    records: list[dict[str, Any]] = []
+    for name in wb.sheetnames:
+        if not sheet_re.search(name):
             continue
-        ws = wb[sheet_name]
-        recs = _parse_mapping_sheet(ws, kind)
-        for r in recs:
-            r["source_file"] = path.name
-        all_records.extend(recs)
-    wb.close()
-    return all_records
+        records.extend(extract_sheet(wb[name], path.name, config))
+    return records
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("inputs", nargs="+", help="设计书 .xlsx 文件路径（可多个）")
-    ap.add_argument("-o", "--output", required=True, help="输出 JSONL 路径")
-    ap.add_argument("--append", action="store_true", help="追加而非覆盖")
-    args = ap.parse_args()
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("xlsx", help="设计书 Excel 路径")
+    ap.add_argument("--config", required=True, help="项目配置 yaml 路径")
+    ap.add_argument("--out", help="输出 jsonl 路径（默认 projects/<name>/knowledge/pilot/<stem>.jsonl）")
+    args = ap.parse_args(argv[1:])
 
-    mode = "a" if args.append else "w"
-    total = 0
-    with open(args.output, mode, encoding="utf-8") as f:
-        for p in args.inputs:
-            path = Path(p)
-            if not path.exists():
-                print(f"[skip] not found: {p}", file=sys.stderr)
-                continue
-            try:
-                recs = extract_file(path)
-            except Exception as e:
-                print(f"[error] {path.name}: {e}", file=sys.stderr)
-                continue
-            for r in recs:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            total += len(recs)
-            print(f"[ok] {path.name}: {len(recs)} records", file=sys.stderr)
-    print(f"[done] total={total} -> {args.output}", file=sys.stderr)
+    src = Path(args.xlsx)
+    if not src.exists():
+        print(f"not found: {src}", file=sys.stderr)
+        return 1
+    config = load_config(args.config)
+    records = extract_file(src, config)
+
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        cfg_root = Path(args.config).resolve().parent
+        out_path = cfg_root / config.get("out_dir", "knowledge") / "pilot" / (
+            re.sub(r"[^A-Za-z0-9_.-]", "_", src.stem) + ".jsonl"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print(f"wrote {len(records)} records → {out_path}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))

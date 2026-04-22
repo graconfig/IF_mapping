@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 生成物（由 scripts/build_index.py 重建）
+projects/*/knowledge/field_mappings.jsonl
+projects/*/knowledge/ifs.db
+projects/*/knowledge/pilot/
+
+# 临时
+*.log
+.DS_Store

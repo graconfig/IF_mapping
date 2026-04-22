@@ -1,0 +1,70 @@
+# KAPS2再構築PJ 项目配置
+# 此文件定义了本项目接口设计书的"约定"，抽取器按这份配置解析 Excel。
+# 换到新项目时复制此文件到 projects/<new>/config.yaml 并调整关键词即可。
+
+name: KAPS2再構築PJ
+description: 部品SAP 向け接口设计书字段映射知识库
+
+sources_dir: sources        # 设计书目录，相对 projects/<name>/
+out_dir: knowledge          # 产物目录，相对 projects/<name>/
+
+# 识别"映射表"工作表
+mapping_sheet:
+  # 工作表名匹配正则（re.search 语义）
+  name_regex: "項目マッピング"
+  # 表头行号（第 6 行是 №/項目名称/...），1-based
+  header_row: 6
+  # 数据起始行
+  data_start_row: 7
+  # 系统 label 所在行（A5、K5 这类），1-based
+  label_row: 5
+
+# 字段语义锚点：每个语义对应一组同义词；表头单元格文本命中其一即认定
+# 抽取器扫表头找连续 6 个语义列（顺序按 keys 出现），一张表应出现两个这样的块（左外部 + 右 SAP 或相反）
+field_semantics:
+  "no":     ["№", "No", "No.", "NO", "序号"]   # 必须引号：YAML 1.1 会把裸 no 解析成布尔 False
+  "name":   ["項目名称", "項目名", "Field Name", "字段名", "字段名称"]
+  "struct": ["構造", "Table", "表名", "构造"]
+  "tech":   ["技術名称", "技術名", "Technical Name", "技术名", "技术名称"]
+  "length": ["文字数", "桁数", "Length", "长度", "バイト数"]
+  "type":   ["属性", "Type", "类型", "データ型", "型"]
+
+# 识别"目标侧"（SAP / ERP）。在 label_row 行扫单元格文本，
+# 命中这些关键词的那一侧即为 SAP 侧；另一侧为外部系统。
+# 通过正则匹配（忽略大小写）。
+target_side:
+  # 保持与旧版严格等价：只认 "部品SAP" 和全角 "ＳＡＰ"
+  # 若需放宽（单独 SAP、英文 ERP 等），在换项目时调整
+  label_patterns:
+    - "部品\\s*SAP"
+    - "ＳＡＰ"
+
+# 辅助列（按 row=5 或 row=header_row 的文本关键词识别列位）
+# 工具只会取每个语义的第一次命中列
+aux_columns:
+  conv_spec:     ["変換仕様"]
+  conv_current:  ["現行編集仕様"]
+  sap_digits:    ["桁数"]
+  sap_code_system: ["コード体系"]
+  sap_supplement:  ["補足・その他", "補足"]
+  unrealizable_no: ["No."]
+  unrealizable_class: ["分類"]
+  remark:        ["備考", "Remark", "备注"]
+
+# 方向推断规则（按优先级）
+direction_rules:
+  sheet_suffix:
+    "(受信)": external_to_sap
+    "(返信)": sap_to_external
+  file_marker:
+    "※受信": external_to_sap
+    "※送信": sap_to_external
+  # fallback: 根据 sap_side 位置
+  #   sap_side == "left"  → sap_to_external
+  #   sap_side == "right" → external_to_sap
+  fallback_by_sap_side: true
+
+# IF 元信息所在位置（ifid 在 A2，if_name 在 C2，均 1-based）
+if_meta:
+  ifid_cell:    [2, 1]       # row=2, col=1
+  if_name_cell: [2, 3]       # row=2, col=3
