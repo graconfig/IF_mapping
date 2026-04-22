@@ -235,12 +235,30 @@ def build_norm_index(kb: sqlite3.Connection) -> dict[str, set[str]]:
 # ------------- 推测层辅助：业务词典 / 结构字典 / 关键词提取 ------------- #
 
 def load_business_dict(project_dir: Path) -> dict:
-    """从 projects/<name>/business_dict.yaml 读业务语义词典。可选。"""
-    p = project_dir / "business_dict.yaml"
-    if not p.exists():
-        return {"patterns": []}
-    with open(p, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {"patterns": []}
+    """合并加载业务语义词典：默认（scripts/business_dict.default.yaml）+ 项目（projects/<name>/business_dict.yaml）。
+
+    合并策略：项目词典在前，默认在后（项目 regex 优先命中）。
+    """
+    merged_patterns: list[dict] = []
+
+    proj = project_dir / "business_dict.yaml"
+    if proj.exists():
+        with open(proj, encoding="utf-8") as f:
+            d = yaml.safe_load(f) or {}
+            merged_patterns.extend(d.get("patterns") or [])
+
+    default = Path(__file__).resolve().parent / "business_dict.default.yaml"
+    if default.exists():
+        with open(default, encoding="utf-8") as f:
+            d = yaml.safe_load(f) or {}
+            default_patterns = d.get("patterns") or []
+            # 去重：项目已有同 regex 的不再加
+            existing_regexes = {p.get("regex") for p in merged_patterns}
+            for p in default_patterns:
+                if p.get("regex") not in existing_regexes:
+                    merged_patterns.append(p)
+
+    return {"patterns": merged_patterns}
 
 
 def build_struct_field_dict(kb: sqlite3.Connection) -> dict[str, list[dict]]:

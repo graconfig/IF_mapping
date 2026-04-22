@@ -1,0 +1,110 @@
+# SAP 通用业务语义词典（跨项目共用）
+# 与 projects/<name>/business_dict.yaml 合并使用（项目自定义覆盖同名 regex）
+#
+# 每条 pattern：
+#   regex: 对空白设计书的 ext_name 做 re.search
+#   suggest: 按优先级的 SAP 候选（struct/tech/name）
+#   hint: 业务说明
+#   skip_reason: 若匹配则判定为接口内部字段，不给 SAP 候选
+
+patterns:
+  # ========== 数量族 ==========
+  - regex: "(?:^|[^A-Za-z])数$|数量|個数|件数|ケース|PCS|QTY"
+    suggest:
+      - { struct: LIPS, tech: LFIMG,  name: "出荷数量" }
+      - { struct: VBAP, tech: KWMENG, name: "受注数量" }
+      - { struct: EBAN, tech: MENGE,  name: "購買依頼数量" }
+    hint: "数量字段：出荷/交货→LIPS.LFIMG；受注/订单→VBAP.KWMENG"
+
+  # ========== 重量 ==========
+  - regex: "重量|WEIGHT"
+    suggest:
+      - { struct: LIPS, tech: NTGEW, name: "正味重量" }
+      - { struct: LIPS, tech: BRGEW, name: "総重量" }
+    hint: "正味（含净重）vs 総（毛重 含包装）"
+
+  # ========== 日期 ==========
+  - regex: "日$|日付|年月日|DATE|YYMMDD|YYYYMMDD"
+    suggest:
+      - { struct: LIKP, tech: WADAT, name: "出荷日" }
+      - { struct: VBAK, tech: AUDAT, name: "受注日" }
+      - { struct: VBRK, tech: FKDAT, name: "請求日" }
+    hint: "根据上下文选择具体日期"
+
+  # ========== 时刻 ==========
+  - regex: "時刻|時間|TIME|HHMMSS"
+    suggest:
+      - { struct: LIKP, tech: ABLAD, name: "出荷時刻" }
+
+  # ========== 名称/文本 ==========
+  - regex: "^品名|品名|商品名|名称|MAKTX|TEXT"
+    suggest:
+      - { struct: MAKT, tech: MAKTX, name: "品目テキスト" }
+
+  # ========== 包装/HU ==========
+  - regex: "荷札|ラベル|包装|BOX|ボックス|HU|パレット|荷集め"
+    suggest:
+      - { struct: VEKP, tech: EXIDV, name: "外部 HU ID" }
+
+  # ========== 形態/种类 ==========
+  - regex: "形態|種類|区分|タイプ|TYPE"
+    suggest:
+      - { struct: LIKP, tech: LFART, name: "納品タイプ" }
+      - { struct: VBAK, tech: AUART, name: "販売伝票タイプ" }
+
+  # ========== 客户 ==========
+  - regex: "得意先|顧客|CUSTOMER"
+    suggest:
+      - { struct: VBAK, tech: KUNNR, name: "受注先得意先" }
+      - { struct: LIKP, tech: KUNAG, name: "出荷得意先" }
+
+  # ========== 地址/收货地 ==========
+  - regex: "納所|納入先|卸先|出荷先"
+    suggest:
+      - { struct: VBPA, tech: KUNNR, name: "取引先機能：出荷先/納入先" }
+
+  # ========== 品番 ==========
+  - regex: "品番|品目|MATERIAL|材料"
+    suggest:
+      - { struct: MARA, tech: MATNR, name: "品目コード" }
+      - { struct: VBAP, tech: MATNR, name: "受注明細品目" }
+
+  # ========== 伝票番号 ==========
+  - regex: "伝票|オーダー|ORDER|伝票No|伝票番号"
+    suggest:
+      - { struct: VBAK, tech: VBELN, name: "販売伝票" }
+      - { struct: LIKP, tech: VBELN, name: "出荷伝票" }
+      - { struct: VBRK, tech: VBELN, name: "請求伝票" }
+
+  # ========== 金额 ==========
+  - regex: "金額|価格|単価|AMOUNT|PRICE"
+    suggest:
+      - { struct: VBAP, tech: NETWR, name: "明細純額" }
+      - { struct: VBAK, tech: NETWR, name: "伝票純額" }
+
+  # ========== 通貨 ==========
+  - regex: "通貨|CURRENCY"
+    suggest:
+      - { struct: VBAK, tech: WAERK, name: "通貨" }
+
+  # ========== 地址 ==========
+  - regex: "郵便番号|ZIP|POSTCODE"
+    suggest:
+      - { struct: ADRC, tech: POST_CODE1, name: "郵便番号" }
+
+  - regex: "電話|TEL|PHONE"
+    suggest:
+      - { struct: ADRC, tech: TEL_NUMBER, name: "電話番号" }
+
+  # ========== 跳过：接口控制字段 ==========
+  - regex: "^予備$|^FIL\\d|保留|PADDING"
+    skip_reason: "填充/保留字段"
+
+  - regex: "枝番$|連番(?!.*番号)|シーケンス|SEQ"
+    skip_reason: "接口内部序号/枝番，通常不映射 SAP 表"
+
+  - regex: "^ファイルI[DＤ]|^ファイルＩＤ|^BFIL|FILE_?ID|ヘッダ区分"
+    skip_reason: "接口文件/报文控制字段，不映射"
+
+  - regex: "^更新区分$|処理区分$|アテンション|エラーSW"
+    skip_reason: "接口处理标识字段"

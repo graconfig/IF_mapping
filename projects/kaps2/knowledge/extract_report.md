@@ -1,4 +1,4 @@
-# 抽取统计报告 — KAPS2再構築PJ
+# 抽取统计报告 — kaps2
 
 - 配置: `/data/xiao/IF_mapping/projects/kaps2/config.yaml`
 - 数据源: `/data/xiao/IF_mapping/历史设计书`
