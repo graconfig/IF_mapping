@@ -1,0 +1,31 @@
+# 输入 schema —— 描述空白设计书（RS020）的解析规则
+# 约定：与同名 .xls/.xlsx 放同目录，fill_book.py 会自动寻找
+#      fill_out/<stem>.xls
+#      fill_out/<stem>.schema.yaml  ← 本文件
+
+sheet: RS020                 # 若省略则用第一个工作表
+header_row: 2                # 1-based
+data_start_row: 3
+
+# 列映射：语义 → Excel 列（字母或数字 1-based）。
+# 未列出的语义 → None（表示空白设计书没这个信息）
+columns:
+  ext_no:      A     # №（序号，仅供参考）
+  ext_name:    C     # 項目名
+  ext_tech:    D     # 項目コード（COBOL 风格缩写，重要匹配键）
+  ext_type:    E     # Type（C=character、N=numeric 等）
+  ext_len:     F     # Leng(整数)
+  ext_byte:    I     # Byte
+  remark:      K     # 備考
+
+# 跳过不需要映射的字段（按 ext_name 或 ext_tech 精确匹配）
+skip:
+  names: ["予備"]
+  techs: ["FIL1", "FIL2", "FIL3", "FIL4", "FIL5"]
+
+# 业务元信息（人工标注，可选，但填上能让 Markdown 头清楚）
+if_meta:
+  ifid_guess: RS020
+  if_name: 国内出荷連絡データ(MQ)
+  direction: external_to_sap   # 空白设计书是 SAP 接收方；仅作参考
+  counterpart_hint: null       # 若已知对向系统
