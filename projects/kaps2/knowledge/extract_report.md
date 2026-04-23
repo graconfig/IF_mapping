@@ -1,7 +1,7 @@
 # 抽取统计报告 — kaps2
 
 - 配置: `/data/xiao/IF_mapping/projects/kaps2/config.yaml`
-- 数据源: `/data/xiao/IF_mapping/历史设计书`
+- 数据源: `/data/xiao/IF_mapping/projects/kaps2/sources`
 - 扫描文件: 44
 - 抽取失败: 0
 - 记录总数: 2150
