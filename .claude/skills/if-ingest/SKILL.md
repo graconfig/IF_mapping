@@ -7,69 +7,74 @@ description: 从一个目录的历史接口设计书（SAP 字段映射文档）
 
 ## 何时使用此 skill
 
-- 用户提供一个装有历史接口设计书（Excel/xlsx 或 xls）的目录，要求"摄取"/"建立知识库"/"读入参考文档"。
-- 新项目首次配置，用户给出项目名和参考文档位置。
-- 用户已有知识库但追加了新设计书，想重跑扫描刷新索引。
+- 用户提供一个装有历史接口设计书（Excel）的目录，要求"摄取"/"建立知识库"/"读入参考文档"。
+- 新项目首次配置，用户给出项目名与参考文档位置。
+- 已有知识库但追加了新设计书，想重跑刷新索引。
 
-## 产物
+## 用户视角
 
-- `projects/<project>/config.yaml` — 项目探测配置（自动生成 + 可人工复核）
-- `projects/<project>/sources/` — 参考文档目录（软链或直接存放）
-- `projects/<project>/knowledge/field_mappings.jsonl` — 字段映射主库
-- `projects/<project>/knowledge/ifs.db` — SQLite 索引（供 `if-map` 查询）
-- `projects/<project>/knowledge/extract_report.md` — 抽取统计
+用户**不需要看/编 config.yaml**。整个流程对他是：「给目录 → 稍等 → 拿到知识库统计」。所有格式识别由 skill 和 AI 在后台自动完成；只有 AI 判断存在风险时才用自然语言提简单问题（例如"这些设计书的表头好像不在第 6 行，对吗？"）。
 
 ## 执行步骤
 
-1. **确认输入**
-   - 项目名（若未提供则询问；默认用目录名，如 `kaps2`）
-   - 参考文档目录的绝对路径
-   - 如果目录已存在 `projects/<project>/`，提醒用户是"新建/覆盖" vs "追加重跑"
+### 1. 接收输入
+- **项目名**：若未给，默认取参考目录末段（如 `/data/foo/kaps2/` → `kaps2`）。如果仍推不出，用自然语言问。
+- **参考文档目录**：绝对路径。
+- 如果 `projects/<project>/` 已存在，用自然语言问是"追加重跑"还是"从零新建"（不提 yaml 细节）。
 
-2. **准备项目目录**
-   ```bash
-   mkdir -p projects/<project>/{knowledge,fill_out}
-   # 把参考文档目录作为 sources（软链或复制均可）
-   ln -sfn <absolute_reference_dir> projects/<project>/sources
-   ```
+### 2. 准备项目目录
+```bash
+mkdir -p projects/<project>/{knowledge,fill_out}
+ln -sfn <absolute_reference_dir> projects/<project>/sources
+```
 
-3. **自动探测配置**
-   - 从参考目录里挑一份有代表性的 xlsx 样本（优先选**含双表式 `項目マッピング(受信)/(返信)` 或最大**的那份）
-   - 运行：
-     ```bash
-     python3 scripts/detect_schema.py --as reference <sample.xlsx> \
-       --project <project> --out projects/<project>/config.yaml
-     ```
-   - 读取生成的 `config.yaml`，向用户展示关键字段：
-     - `mapping_sheet.header_row / data_start_row / label_row`
-     - `target_side.label_patterns`（SAP 侧 label 正则）
-     - `if_meta.ifid_cell / if_name_cell` 位置
-   - 明确告诉用户：若任一项异常，可手工编辑 `projects/<project>/config.yaml` 后继续
+### 3. 自动探测（后台完成，不向用户展示 yaml）
+- 从 `sources/` 挑一份有代表性的 xlsx（优先选文件名含 "受注" / "出荷" / "インボイス" 等明显业务词、或体积较大的）：
+  ```bash
+  python3 scripts/detect_schema.py --as reference <sample.xlsx> \
+    --project <project> --out projects/<project>/config.yaml
+  ```
+- 生成的 config.yaml **不向用户展示**，只作为内部缓存。
 
-4. **用户确认**
-   - 询问"是否直接建库，还是先让你修改 config.yaml？"
-   - 若用户让直接跑，进入下一步；若让 review，等待用户修改完成信号
+### 4. AI 语义校验（关键）
+用 Read 工具直接打开 1-2 份样本 xlsx（Read 支持 xlsx），检查探测结果是否合理：
+- **表头是否在探测出的 `header_row` 行**（看该行是否含"項目名称/Field Name/项目名"等语义词，而不是业务数据）
+- **两侧字段块的列位置是否对应"外部字段"和"SAP 字段"**（右侧是否出现 `VBAK/LIKP/MARA` 这类 SAP 表名）
+- **SAP 侧识别是否正确**（label 行是否真含"部品SAP/ＳＡＰ"）
 
-5. **批量抽取 + 建索引**
-   ```bash
-   python3 scripts/build_index.py --project <project>
-   ```
-   这一步会扫描 `sources/` 下所有 xlsx（支持 .xls 需先用 soffice 转换，或提醒用户）。
+如果 Read 无法直接读 xlsx 内容，用 `python3 -c "import openpyxl..."` 的短脚本读取关键行。
 
-6. **展示统计**
-   读 `projects/<project>/knowledge/extract_report.md`，向用户汇报：
-   - 扫描/抽取成功/失败的文件数
-   - 总记录数、有 SAP 技术名的记录数
-   - 不同 SAP 构造数、対向先系统数
-   - 若有 0 条抽取的文件，列出文件名（通常是特殊格式需要手工处理）
+**校验通过** → 跳到步骤 6。
+**校验可疑** → 步骤 5。
 
-7. **下一步提示**
-   - 提示用户：知识库已可用；使用 `if-map` skill 对空白设计书回填 SAP 字段
+### 5. 仅在需要时求助（A3 兜底）
+用**业务语言**问 1-2 个具体问题（不提 yaml / config / header_row 这些词）：
+- "这份设计书里写 SAP 字段的表叫什么？（比如 `項目マッピング` / `Mapping` / 别的）"
+- "字段列表一般从第几行开始？"
+- "哪一列是 SAP 的表名、哪一列是 SAP 的字段名？"
+
+根据回答**直接修改** `projects/<project>/config.yaml` 相应字段（AI 代编辑，不让用户动文件），然后重跑步骤 4 验证。
+
+### 6. 批量抽取建库
+```bash
+python3 scripts/build_index.py --project <project>
+```
+命令支持 .xlsx；如发现 sources/ 里有 .xls，先提示用户或批量用 soffice 转。
+
+### 7. 向用户汇报（业务语言）
+读 `knowledge/extract_report.md`，用几句话告诉用户：
+- 扫描了 N 个文件，成功抽取 M 条字段映射
+- 覆盖的 SAP 表有多少种（举 3-5 个常见的）
+- 对向系统有哪些
+- 若有文件抽不到内容，列出文件名并简短说原因
+- **不提**"config.yaml / header_row / regex" 这些技术细节
+
+### 8. 结束语
+提示用户：知识库已可用。下次有空白设计书直接说"map xxx.xls"或"映射这份设计书"触发 `if-map`。
 
 ## 关键注意事项
 
-- 若 `sources/` 目录里含 .xls（旧格式）文件，`build_index.py` 目前只读 .xlsx，需要先用 soffice 批量转换或跳过。不要自动删除原 .xls。
-- `detect_schema.py` 可能在特殊格式的 Excel 上失败（比如没有标准 "項目マッピング" 工作表）—— 失败时向用户请教样本的实际结构。
-- 若用户未提供项目名，默认取参考目录的最后一段（如 `/data/foo/kaps2/` → `kaps2`）。
-- **不要**自动删除或覆盖用户现有的 `projects/<project>/config.yaml`：若文件已存在，询问"覆盖 / 保留 / diff"。
-- 项目 SAP 通用业务词典无需在此配置 —— `if-map` 会自动加载 `scripts/business_dict.default.yaml` 与 `projects/<project>/business_dict.yaml`（可选）合并使用。
+- 全流程**不主动给用户看 config.yaml**；即使 AI 自己修改它也不宣布文件名（可说"已调整参数"）。
+- .xls 文件：`build_index.py` 只读 .xlsx。若 sources/ 里有 .xls，需要先用 `soffice --headless --convert-to xlsx` 批量转换（询问用户是否自动转；不主动删除原 .xls）。
+- 若 `detect_schema.py` 在 AI 校验前就已报错（比如找不到字段块），直接进入步骤 5 用对话兜底。
+- 不要覆盖用户已有的 `projects/<project>/` 除非明确说"从零新建"。
