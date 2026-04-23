@@ -191,7 +191,13 @@ def _dump_yaml(data: dict, header_comment: str = "") -> str:
 
 
 def render_blank_yaml(detected: dict, if_name_hint: str = "") -> str:
-    cols = {sem: _col_letter(c) for sem, c in detected["columns"].items()}
+    # 探测器内部语义 → fill_book 期待的 schema key
+    SEM_TO_SCHEMA_KEY = {
+        "no": "ext_no", "name": "ext_name", "tech": "ext_tech",
+        "type": "ext_type", "length": "ext_len", "remark": "remark",
+    }
+    cols = {SEM_TO_SCHEMA_KEY.get(sem, sem): _col_letter(c)
+            for sem, c in detected["columns"].items()}
     data = {
         "sheet": detected["sheet"],
         "header_row": detected["header_row"],
