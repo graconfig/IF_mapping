@@ -24,7 +24,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_mapping import extract_file, load_config  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
+# 项目根：以调用方 CWD 为准，允许 skill 从任何位置调用时仍能定位到项目的 projects/<name>/
+ROOT = Path.cwd()
 
 
 SCHEMA = """

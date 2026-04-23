@@ -38,7 +38,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-ROOT = Path(__file__).resolve().parent.parent
+# 项目根：以调用方 CWD 为准（skill 从项目根运行）
+ROOT = Path.cwd()
 TOP_N = 3
 
 # 追加列的起始位置（L 列 = 12）。若原表宽度已超过，动态推后。
