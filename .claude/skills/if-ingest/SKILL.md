@@ -31,7 +31,7 @@ ln -sfn <absolute_reference_dir> projects/<project>/sources
 ### 3. 自动探测（后台完成，不向用户展示 yaml）
 - 从 `sources/` 挑一份有代表性的 xlsx（优先选文件名含 "受注" / "出荷" / "インボイス" 等明显业务词、或体积较大的）：
   ```bash
-  python3 .claude/skills/if-ingest/scripts/detect_schema.py --as reference <sample.xlsx> \
+  python3 .claude/skills/if-ingest/scripts/detect_schema.py <sample.xlsx> \
     --project <project> --out projects/<project>/config.yaml
   ```
 - 生成的 config.yaml **不向用户展示**，只作为内部缓存。

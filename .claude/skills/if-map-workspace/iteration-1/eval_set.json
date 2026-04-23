@@ -1,0 +1,82 @@
+[
+  {
+    "query": "我手头这份 RS050_海外受注取消.xls 是空白的，SAP 那边对应字段帮我出个候选吧",
+    "should_trigger": true
+  },
+  {
+    "query": "把 /data/xiao/IF_mapping/projects/kaps2/fill_out/ZZ020_在庫照会.xls 映射下，右侧 SAP 几列留空着了",
+    "should_trigger": true
+  },
+  {
+    "query": "map this ZPXX_order_v2.xls",
+    "should_trigger": true
+  },
+  {
+    "query": "客户送来个新接口定义书，IF 编号 ZPXXX，让我给他们推荐下 SAP 的表字段，kaps2 项目下知识库建好了",
+    "should_trigger": true
+  },
+  {
+    "query": "这份 A-PIKO 的 shipping advice 设计书 IT 那边只填了他们系统的字段，SAP 这边 VBAK/LIKP 怎么对应我得搞清楚",
+    "should_trigger": true
+  },
+  {
+    "query": "帮我给 /tmp/kubota_order_v3.xls 补一下 SAP 字段推荐，要 top3 的那种带下拉的 excel",
+    "should_trigger": true
+  },
+  {
+    "query": "空白的 IF 定义书要怎么填 SAP 侧字段？能不能看看历史上类似接口是怎么映射的",
+    "should_trigger": true
+  },
+  {
+    "query": "R20 业务的新接口 IT 部给了个 spec xlsx，项目是 kaps2，按惯例产个候选文件",
+    "should_trigger": true
+  },
+  {
+    "query": "interface 映射这份 DOS_出荷完了.xls",
+    "should_trigger": true
+  },
+  {
+    "query": "给这份 spec 文件推荐 SAP 字段",
+    "should_trigger": true
+  },
+  {
+    "query": "扫描 /data/refs 目录下的所有设计书建知识库",
+    "should_trigger": false
+  },
+  {
+    "query": "把 /history/design_docs 里那些 IF 定义书批量读进来，做成映射数据库",
+    "should_trigger": false
+  },
+  {
+    "query": "SAP 的 VBAK 表里 KUNNR 字段的业务语义是什么",
+    "should_trigger": false
+  },
+  {
+    "query": "fill_book.py 里 confidence_label 函数有 bug 吗？历史 1 次也会给 ★★",
+    "should_trigger": false
+  },
+  {
+    "query": "把 projects/kaps2/knowledge/ifs.db 导出成 CSV 给 BI 团队用",
+    "should_trigger": false
+  },
+  {
+    "query": "这份 xlsx 里合并单元格的内容帮我抽取出来到一个新 sheet",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我看看 projects/kaps2/business_dict.yaml 里'数量'族的 regex 写得对不对",
+    "should_trigger": false
+  },
+  {
+    "query": "昨天 fill_book 跑出来的 RS020_候选.xlsx 里 3 个字段推荐错了，怎么改",
+    "should_trigger": false
+  },
+  {
+    "query": "对比两次 iteration 的 fill_book 产物，信心度分布变化",
+    "should_trigger": false
+  },
+  {
+    "query": "安装 openpyxl 和 xlrd 库，然后跑一下 pytest",
+    "should_trigger": false
+  }
+]
