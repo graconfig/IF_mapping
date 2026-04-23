@@ -21,6 +21,8 @@ import argparse
 import re
 import shutil
 import sqlite3
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -54,6 +56,12 @@ FILL_HEADER   = PatternFill(start_color="CFE2F3", end_color="CFE2F3", fill_type=
 NO_MATCH_OPTION = "（无历史映射 — 可能为接口内部字段）"
 SKIP_OPTION = "（填充/占位，跳过映射）"
 SPECULATE_PREFIX = "[推测] "
+AI_SPECULATE_PREFIX = "[AI推测] "
+
+# AI 推测配置
+AI_TIMEOUT_SEC = 120      # 单字段 AI 调用超时（claude -p 30-60s 是常态）
+AI_MAX_HISTORY_HITS = 12  # 喂给 AI 的关键词历史命中条数上限
+AI_MAX_STRUCT_FIELDS = 10 # 每个 top struct 下喂给 AI 的字段数上限
 
 # 推测信号权重
 SPEC_WEIGHT_SUBSTR = 0.15     # S1 名称子串（低权重 + freq 封顶，避免偶发 1 次主导）
@@ -476,28 +484,306 @@ def pass1_speculate(
     return sorted(agg.values(), key=lambda x: x["weighted_freq"], reverse=True)
 
 
+def _build_ai_prompt(
+    field: dict,
+    kb: sqlite3.Connection,
+    business_dict: dict,
+    struct_dict: dict[str, list[dict]],
+    ctx_counter: Counter,
+    ctx_structs: list[str],
+    book_field_summary: list[dict],
+    if_meta: dict,
+) -> str:
+    """构建喂给 AI 的上下文 prompt：字段信息 + 业务场景 + 本书上下文 + 检索辅助 + 任务规约。"""
+    # ---- 1. 字段信息 ----
+    name = field.get("ext_name") or ""
+    tech = field.get("ext_tech") or ""
+    field_lines = [
+        f"项目名: {name}",
+        f"项目代码: {tech}",
+        f"类型: {field.get('ext_type') or '?'}  长度: {field.get('ext_len') or '?'}  字节: {field.get('ext_byte') or '?'}",
+        f"备注: {field.get('remark') or '(无)'}",
+    ]
+
+    # ---- 2. 本接口业务场景 ----
+    ifid = if_meta.get("ifid_guess") or "?"
+    if_name = if_meta.get("if_name") or "?"
+    direction = if_meta.get("direction") or "unknown"
+    direction_zh = {
+        "external_to_sap": "外部系统 → SAP（入向）",
+        "sap_to_external": "SAP → 外部系统（出向）",
+    }.get(direction, direction)
+    counterpart = if_meta.get("counterpart_hint") or "?"
+    biz_lines = [
+        f"IFID: {ifid}",
+        f"业务名: {if_name}",
+        f"方向: {direction_zh}",
+        f"对向系统: {counterpart}",
+    ]
+
+    # ---- 3. 本书已确定的字段分布 ----
+    resolved = [f for f in book_field_summary if f.get("sap_struct")]
+    skipped = [f for f in book_field_summary if f.get("is_skipped")]
+    by_struct: dict[str, list[str]] = {}
+    for r in resolved:
+        s = r["sap_struct"]
+        by_struct.setdefault(s, []).append(
+            f"{r['ext_name']}({r['ext_tech']}) → {s}.{r['sap_tech']}（{r.get('sap_name') or ''}）"
+        )
+    book_lines = []
+    for s, entries in sorted(by_struct.items(), key=lambda x: -len(x[1])):
+        book_lines.append(f"- {s} ({len(entries)} 字段):")
+        for e in entries[:6]:
+            book_lines.append(f"    · {e}")
+    if skipped:
+        names = ", ".join((f"{f.get('ext_name')}({f.get('ext_tech')})" for f in skipped[:8]))
+        book_lines.append(f"- 已跳过接口内部字段: {names}")
+    if not book_lines:
+        book_lines.append("(本书其他字段尚未确定 SAP 映射)")
+
+    # ---- 4. 检索辅助 ----
+    # 4a. 关键词历史命中
+    kw_hits: list[str] = []
+    for kw in extract_keywords(name):
+        rows = kb.execute("""
+            SELECT ext_name, sap_struct, sap_tech, sap_name, COUNT(*) AS freq
+            FROM field_mappings
+            WHERE ext_name LIKE ? AND sap_tech IS NOT NULL
+            GROUP BY ext_name, sap_struct, sap_tech, sap_name
+            ORDER BY freq DESC LIMIT 4
+        """, (f"%{kw}%",)).fetchall()
+        for r in rows:
+            struct_n = normalize_struct(r["sap_struct"])
+            tech_n = normalize_multiline(r["sap_tech"])
+            kw_hits.append(
+                f"[关键词 '{kw}'] {r['ext_name']} → {struct_n}.{tech_n}（{r['sap_name'] or ''}）×{r['freq']}"
+            )
+            if len(kw_hits) >= AI_MAX_HISTORY_HITS:
+                break
+        if len(kw_hits) >= AI_MAX_HISTORY_HITS:
+            break
+
+    # 4b. 业务词典候选
+    dict_hits: list[str] = []
+    dict_skip_hit: str | None = None
+    for pat in business_dict.get("patterns") or []:
+        if not re.search(pat["regex"], name):
+            continue
+        if "skip_reason" in pat:
+            dict_skip_hit = pat["skip_reason"]
+            continue
+        for sug in pat.get("suggest") or []:
+            dict_hits.append(
+                f"[规则 '{pat['regex'][:20]}'] → {sug['struct']}.{sug['tech']}（{sug.get('name') or ''}）"
+            )
+        if pat.get("hint"):
+            dict_hits.append(f"  ↳ 业务提示: {pat['hint']}")
+
+    # 4c. 本书 Top 结构下的常见字段
+    struct_field_lines: list[str] = []
+    for s in ctx_structs[:3]:
+        entries = struct_dict.get(s, [])[:AI_MAX_STRUCT_FIELDS]
+        if not entries:
+            continue
+        struct_field_lines.append(f"- {s} 常见字段:")
+        for e in entries:
+            struct_field_lines.append(f"    · {s}.{e['sap_tech']}（{e.get('sap_name') or ''}）")
+
+    # ---- 组装 prompt ----
+    parts = [
+        "你是 SAP 接口设计顾问。帮我为一个外部系统字段推荐对应的 SAP 表和字段。",
+        "",
+        "## 待推荐字段",
+        *field_lines,
+        "",
+        "## 本接口业务场景",
+        *biz_lines,
+        "",
+        "## 本接口已确定的字段分布（用于推断业务上下文）",
+        *book_lines,
+    ]
+    if kw_hits:
+        parts += ["", "## 知识库中按关键词检索到的历史映射（参考）", *kw_hits]
+    if dict_hits:
+        parts += ["", "## 业务词典规则命中的候选", *dict_hits]
+    if dict_skip_hit:
+        parts += ["", f"## 业务词典的 skip 提示", f"- {dict_skip_hit}"]
+    if struct_field_lines:
+        parts += ["", "## 本书上下文 Top 结构的常见字段（知识库统计）", *struct_field_lines]
+
+    parts += [
+        "",
+        "## 任务",
+        "基于以上全部信息，给这个字段推荐 Top-3 SAP 候选，或判定为接口内部字段不需映射。",
+        "只能使用真实存在的 SAP 标准表字段；不要编造。",
+        "严格返回 JSON（不要其他文字），格式：",
+        '''{
+  "skip": false,
+  "reason": "(若 skip=true，解释为何不映射；否则留空)",
+  "candidates": [
+    {
+      "sap_struct": "LIPS",
+      "sap_tech":   "LFIMG",
+      "sap_name":   "出荷数量",
+      "confidence": 0.85,
+      "reason":     "本接口在讨论出荷（LIKP/LIPS 家族），'数' 后缀 + 出荷上下文 → 出荷数量"
+    }
+  ]
+}''',
+    ]
+    return "\n".join(parts)
+
+
+def _call_claude_p(prompt: str, timeout: int = AI_TIMEOUT_SEC) -> dict | None:
+    """调 claude -p（子进程）。成功返回解析后的 JSON dict；失败返回 None。"""
+    try:
+        env = os.environ.copy()
+        # 防止嵌套 claude -p 时环境变量干扰
+        env.pop("CLAUDECODE", None)
+        res = subprocess.run(
+            ["claude", "-p"],
+            input=prompt,
+            capture_output=True, text=True, timeout=timeout,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if res.returncode != 0:
+        return None
+    # 从 stdout 里提取第一个完整 JSON（可能被 markdown 代码块包裹）
+    out = res.stdout
+    # 去掉 ```json … ``` 包裹
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", out, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    # 再尝试裸 JSON
+    m = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", out, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def ai_speculate(
+    field: dict,
+    kb: sqlite3.Connection,
+    business_dict: dict,
+    struct_dict: dict[str, list[dict]],
+    ctx_counter: Counter,
+    ctx_structs: list[str],
+    book_field_summary: list[dict],
+    if_meta: dict,
+) -> tuple[list[dict], str | None]:
+    """让 AI 做推测。返回 (候选列表, skip_reason)。
+    - 列表非空：AI 给出候选（origin="ai_speculate"）
+    - skip_reason 非空：AI 判定为接口内部字段
+    - 两者都空：AI 调用失败（调用方应降级到规则推测）
+    """
+    prompt = _build_ai_prompt(
+        field, kb, business_dict, struct_dict, ctx_counter, ctx_structs,
+        book_field_summary, if_meta,
+    )
+    result = _call_claude_p(prompt)
+    if result is None:
+        return [], None  # AI 失败，调用方降级
+    if result.get("skip"):
+        return [], result.get("reason") or "AI 判定为接口内部字段"
+    cands: list[dict] = []
+    for c in result.get("candidates") or []:
+        struct = str(c.get("sap_struct") or "").strip()
+        tech = str(c.get("sap_tech") or "").strip()
+        if not struct or not tech:
+            continue
+        try:
+            conf = float(c.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            conf = 0.5
+        cands.append({
+            "sap_struct": struct,
+            "sap_tech": tech,
+            "sap_name": c.get("sap_name") or "",
+            "signals": {"ai_speculate": 1},
+            "weighted_freq": max(0.0, min(1.0, conf)),
+            "raw_freq": 1,
+            "ifs": set(),
+            "origin": "ai_speculate",
+            "ai_reason": c.get("reason") or "",
+            "ai_confidence": max(0.0, min(1.0, conf)),
+        })
+    return cands[:TOP_N], None
+
+
+def _build_book_field_summary(
+    fields: list[dict], direct_pairs: list[tuple[dict, list[dict]]],
+    business_dict: dict,
+) -> list[dict]:
+    """为 AI 准备本书字段分布摘要。"""
+    summary: list[dict] = []
+    direct_map = {id(f): cands for f, cands in direct_pairs}
+    for f in fields:
+        entry = {
+            "ext_name": f.get("ext_name"),
+            "ext_tech": f.get("ext_tech"),
+            "sap_struct": None,
+            "sap_tech": None,
+            "sap_name": None,
+            "is_skipped": False,
+        }
+        if f.get("skip"):
+            entry["is_skipped"] = True
+            summary.append(entry)
+            continue
+        cands = direct_map.get(id(f)) or []
+        if cands:
+            top = cands[0]
+            entry["sap_struct"] = top["sap_struct"]
+            entry["sap_tech"] = top["sap_tech"]
+            entry["sap_name"] = top.get("sap_name")
+        elif check_skip_patterns(f.get("ext_name"), business_dict):
+            entry["is_skipped"] = True
+        summary.append(entry)
+    return summary
+
+
 def resolve_candidates(
     field: dict, kb: sqlite3.Connection, norm_index: dict,
     business_dict: dict, struct_dict: dict, ctx_structs: list[str],
+    # 以下为 AI 推测所需的额外上下文（向后兼容可选）
+    ctx_counter: Counter | None = None,
+    book_field_summary: list[dict] | None = None,
+    if_meta: dict | None = None,
+    enable_ai: bool = True,
 ) -> tuple[list[dict], str | None]:
-    """统一入口：L0 直接命中 → 若无 → S1/S2/S3 推测。
-    返回 (候选列表, skip_reason) —— 若 skip_reason 非空则调用方不应展示候选。
-    """
+    """统一入口：L0 直接命中 → 若无 → AI 推测（若启用）→ 失败降级到规则推测。"""
     if field.get("skip"):
         return [], "填充/占位字段，无需映射。"
 
-    # 优先检查业务词典 skip pattern
     skip_reason = check_skip_patterns(field.get("ext_name"), business_dict)
-
     direct = pass1_candidates(field, kb, norm_index)
     if direct:
-        return direct, None  # 有直接命中：即使命中 skip pattern 也给候选（可能是误判）
-
+        return direct, None
     if skip_reason:
         return [], skip_reason
 
+    # AI 推测（首选）
+    if enable_ai and book_field_summary is not None and if_meta is not None:
+        ai_cands, ai_skip = ai_speculate(
+            field, kb, business_dict, struct_dict,
+            ctx_counter or Counter(), ctx_structs,
+            book_field_summary, if_meta,
+        )
+        if ai_skip:
+            return [], f"[AI 判断] {ai_skip}"
+        if ai_cands:
+            return ai_cands, None
+        # AI 失败 → 降级到规则
+
     spec = pass1_speculate(field, kb, business_dict, struct_dict, ctx_structs)
-    # 限制推测候选最多 TOP_N，按结构多样性去重
     spec = _diversify_speculate(spec, limit=TOP_N)
     return spec, None
 
@@ -534,7 +820,14 @@ def pass2_score(cand: dict, total_weighted: float, ctx: Counter) -> float:
 # ------------- 业务化说明文案 ------------- #
 
 def confidence_label(score: float, raw_freq_top: int, origin: str = "history") -> str:
-    # 推测类封顶 ★（推测）
+    # AI 推测封顶 ★★（AI推测），高于规则推测一档（AI 综合语义 + 上下文判断）
+    if origin == "ai_speculate":
+        if score >= 0.8:
+            return "★★（AI推测）"
+        if score >= 0.5:
+            return "★（AI推测）"
+        return "AI推测 需复核"
+    # 规则推测封顶 ★（推测）
     if origin == "speculate":
         return "★（推测）"
     if raw_freq_top <= 1 and score >= 0.85:
@@ -552,6 +845,8 @@ def cand_label(c: dict) -> str:
     """候选在下拉/推荐列的显示字符串。"""
     name = c.get("sap_name") or ""
     core = f"{c['sap_struct']}.{c['sap_tech']}（{name}）" if name else f"{c['sap_struct']}.{c['sap_tech']}"
+    if c.get("origin") == "ai_speculate":
+        return AI_SPECULATE_PREFIX + core
     if c.get("origin") == "speculate":
         return SPECULATE_PREFIX + core
     return core
@@ -579,7 +874,10 @@ def explain_matched(
     cands: list[dict], total_w: float, ctx: Counter, top_score: float
 ) -> str:
     top = cands[0]
-    # 推测类走独立文案
+    # AI 推测走独立文案
+    if top.get("origin") == "ai_speculate":
+        return _explain_ai_speculated(cands)
+    # 规则推测走独立文案
     if top.get("origin") == "speculate":
         return _explain_speculated(cands)
 
@@ -646,6 +944,27 @@ def _explain_speculated(cands: list[dict]) -> str:
         t2 = cands[1]
         msg += f" 备选：{t2['sap_struct']}.{t2['sap_tech']}（{t2.get('sap_name') or ''}）。"
     msg += " 请人工复核。"
+    return msg
+
+
+def _explain_ai_speculated(cands: list[dict]) -> str:
+    """AI 推测候选的说明文案：展示 AI 给的 reason + 候选列表，强调需人工复核。"""
+    top = cands[0]
+    top_name = top.get("sap_name") or top["sap_tech"]
+    top_loc = f"{top['sap_struct']}.{top['sap_tech']}"
+    top_reason = top.get("ai_reason") or ""
+    top_conf = top.get("ai_confidence", top.get("weighted_freq", 0.0))
+
+    msg = f"AI 推测（无历史直接命中，信心 {top_conf:.2f}）：推荐「{top_name}」（{top_loc}）"
+    if top_reason:
+        msg += f"——{top_reason}"
+    if len(cands) > 1:
+        alt_bits = []
+        for c in cands[1:TOP_N]:
+            name = c.get('sap_name') or ''
+            alt_bits.append(f"{c['sap_struct']}.{c['sap_tech']}（{name}）")
+        msg += f"。备选：{' / '.join(alt_bits)}"
+    msg += "。AI 推断仅作参考，请务必人工复核。"
     return msg
 
 
@@ -836,6 +1155,12 @@ def main() -> int:
     ctx = context_structs(direct_pairs)
     ctx_structs = [s for s, _ in ctx.most_common(5)]
 
+    # 为 AI 推测准备本书字段分布摘要
+    book_field_summary = _build_book_field_summary(fields, direct_pairs, business_dict)
+    enable_ai = os.environ.get("IF_MAP_DISABLE_AI") != "1"
+    if enable_ai:
+        print(f"AI 推测启用（{sum(1 for _,d in direct_pairs if not d and not _.get('skip'))} 个字段候选 AI 推测，每字段 ≤{AI_TIMEOUT_SEC}s）", file=sys.stderr)
+
     # Pass 2：对每个字段决定最终 entries（考虑复合 + 推测）
     results: list[dict] = []
     for f, direct in direct_pairs:
@@ -862,9 +1187,13 @@ def main() -> int:
                 results.append({"field": f, "entries": sub_entries, "composite": True})
                 continue
 
-        # 非复合：若无直接命中则尝试推测
+        # 非复合：若无直接命中则尝试 AI 推测，失败降规则
         cands, skip_reason = resolve_candidates(
-            f, kb, norm_index, business_dict, struct_dict, ctx_structs
+            f, kb, norm_index, business_dict, struct_dict, ctx_structs,
+            ctx_counter=ctx,
+            book_field_summary=book_field_summary,
+            if_meta=if_meta,
+            enable_ai=enable_ai,
         )
         # 若有直接命中，cands 就是 direct
         if direct:
@@ -888,6 +1217,11 @@ def main() -> int:
         if not item["composite"] and item["entries"][0][1]
         and item["entries"][0][1][0].get("origin") == "speculate"
     )
+    n_ai = sum(
+        1 for item in results
+        if not item["composite"] and item["entries"][0][1]
+        and item["entries"][0][1][0].get("origin") == "ai_speculate"
+    )
     n_comp = sum(1 for item in results if item["composite"])
     n_skip = sum(1 for f in fields if f.get("skip"))
     n_none = sum(
@@ -897,7 +1231,7 @@ def main() -> int:
     )
     print(f"wrote → {out_path}")
     print(
-        f"fields: {len(fields)} | 直接命中: {n_direct} | 推测: {n_spec} | "
+        f"fields: {len(fields)} | 直接命中: {n_direct} | AI推测: {n_ai} | 规则推测: {n_spec} | "
         f"复合: {n_comp} | 无候选: {n_none} | 跳过: {n_skip}"
     )
     print(f"ctx top: {dict(ctx.most_common(5))}")
