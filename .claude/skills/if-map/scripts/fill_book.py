@@ -170,6 +170,28 @@ def load_input_schema(input_path: Path, override: Path | None = None) -> dict:
         return yaml.safe_load(f)
 
 
+def _normalize_col_spec(spec: Any) -> int | list[int]:
+    """支持 columns 的两种语法：
+      - 单列：'C' / 3  → 列号 int
+      - 多列（取第一个非空，用于 JSON 层级缩进字段）：['B','C','D']  → [2,3,4]
+    """
+    if isinstance(spec, list):
+        return [_col_to_idx(s) for s in spec]
+    return _col_to_idx(spec)
+
+
+def _read_cell_multi(ws, r: int, col_spec: int | list[int]) -> Any:
+    """按列号 / 列区间读取。多列时扫左到右取第一个非空值；同时返回命中深度（第几列，0-based）。"""
+    if isinstance(col_spec, list):
+        for depth, c in enumerate(col_spec):
+            v = _clean(ws.cell(row=r, column=c).value)
+            if v is not None:
+                return v, depth
+        return None, None
+    v = _clean(ws.cell(row=r, column=col_spec).value)
+    return v, 0 if v is not None else None
+
+
 def read_blank_book(xlsx_path: Path, schema: dict) -> tuple[list[dict], dict]:
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
     sheet_name = schema.get("sheet") or wb.sheetnames[0]
@@ -177,23 +199,43 @@ def read_blank_book(xlsx_path: Path, schema: dict) -> tuple[list[dict], dict]:
 
     data_start_row = schema["data_start_row"]
     cols_cfg = schema["columns"]
-    col_idx = {sem: _col_to_idx(spec) for sem, spec in cols_cfg.items()}
+    col_idx = {sem: _normalize_col_spec(spec) for sem, spec in cols_cfg.items()}
+    has_ext_no = "ext_no" in col_idx
 
     skip_names = set(schema.get("skip", {}).get("names") or [])
     skip_techs = set(schema.get("skip", {}).get("techs") or [])
 
+    # 终止条件：连续 N 行 ext_name/ext_tech 都空就认为字段列表结束
+    EMPTY_RUN_STOP = 4
+    empty_run = 0
+    auto_no = 0
+
     fields: list[dict] = []
     for r in range(data_start_row, ws.max_row + 1):
-        rec = {"row_idx": r}
+        rec: dict = {"row_idx": r}
         for sem, c in col_idx.items():
-            rec[sem] = _clean(ws.cell(row=r, column=c).value)
+            val, depth = _read_cell_multi(ws, r, c)
+            rec[sem] = val
+            if sem == "ext_name" and depth is not None:
+                rec["_depth"] = depth  # JSON 层级深度（0=最外层）
         if rec.get("ext_name") is None and rec.get("ext_tech") is None:
+            empty_run += 1
+            if empty_run >= EMPTY_RUN_STOP:
+                break
             continue
-        no_val = rec.get("ext_no")
-        if no_val is None:
-            continue
-        if not (isinstance(no_val, (int, float)) or str(no_val).strip().isdigit()):
-            break  # 末尾页脚
+        empty_run = 0
+
+        # ext_no 逻辑：若 schema 声明且为非数字（页脚特征），停止；否则自动递增
+        if has_ext_no:
+            no_val = rec.get("ext_no")
+            if no_val is None:
+                continue
+            if not (isinstance(no_val, (int, float)) or str(no_val).strip().isdigit()):
+                break  # 末尾页脚
+        else:
+            auto_no += 1
+            rec["ext_no"] = str(auto_no)
+
         name = rec.get("ext_name") or ""
         tech = rec.get("ext_tech") or ""
         if name in skip_names or tech in skip_techs:

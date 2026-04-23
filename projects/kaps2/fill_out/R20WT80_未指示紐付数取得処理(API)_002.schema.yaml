@@ -1,0 +1,27 @@
+# 输入 schema —— R20WT80 API 设计书的 WebサービスIF仕様 sheet 响应段
+# 项目名用 JSON 层级缩进（B/C/D/E/F/G/H/I 多列），取第一个非空
+# 項目 ID 在 L 列，说明在 R 列；没有类型/长度信息
+
+sheet: WebサービスIF仕様
+header_row: 45                # 【 レスポンスデータ 】段的表头：B45/L45/R45
+data_start_row: 46
+
+columns:
+  ext_name: [B, C, D, E, F, G, H, I]   # 层级缩进，0-7 层
+  ext_tech: L                           # 項目 ID (JSON 键名，如 eodom/ukeno)
+  remark:   R                           # 内容说明
+
+skip:
+  names: []
+  techs:
+    - input            # レスポンスの input 节：回传请求数据，API 框架字段
+    - errorCode        # 框架错误码
+    - errorMessage     # 框架错误信息
+    - criteriaList     # input 的子节，非业务字段
+    - chuban           # input 的子节，非业务字段
+
+if_meta:
+  ifid_guess: R20WT80
+  if_name: 未指示紐付数取得処理(API)
+  direction: external_to_sap
+  counterpart_hint: null
