@@ -80,6 +80,9 @@ STOP_KEYWORDS = {
 # L2 上下文加分（不独立产生候选）
 CTX_STRUCT_BOOST = 0.35
 
+# 対向系统画像卡片注入 AI prompt 时的字符上限（避免 prompt 过长）
+COUNTERPART_CARD_MAX_CHARS = 2500
+
 
 # ------------- 基础工具 ------------- #
 
@@ -653,6 +656,17 @@ def _build_ai_prompt(
     if struct_field_lines:
         parts += ["", "## 本书上下文 Top 结构的常见字段（知识库统计）", *struct_field_lines]
 
+    cp_card = if_meta.get("_counterpart_card")
+    cp_name = if_meta.get("_counterpart_card_name")
+    if cp_card:
+        parts += [
+            "",
+            f"## 対向系统业务画像：{cp_name}",
+            "> 知识库中该対向系统的历史接口聚合而成的稳定指纹，用于把握該系统与 SAP 的常用映射规律；优先采纳画像中已稳定出现的字段指纹。",
+            "",
+            cp_card[:COUNTERPART_CARD_MAX_CHARS],
+        ]
+
     parts += [
         "",
         "## 类型与长度约束（重要 — 候选字段必须类型兼容）",
@@ -772,6 +786,68 @@ def ai_speculate(
             "ai_confidence": max(0.0, min(1.0, conf)),
         })
     return cands[:TOP_N], None
+
+
+def _load_counterpart_index(kb_path: Path) -> dict[str, str]:
+    """读 counterparts/_index.json：counterpart 全名 → 卡片相对文件名。"""
+    idx = kb_path.parent / "counterparts" / "_index.json"
+    if not idx.exists():
+        return {}
+    try:
+        return json.loads(idx.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _pick_counterpart(
+    if_meta: dict, direct_pairs: list[tuple[dict, list[dict]]],
+    kb: sqlite3.Connection, cp_index: dict[str, str],
+) -> str | None:
+    """选最匹配的对向系统名。优先级：
+      1) if_meta.counterpart_hint 精确匹配卡片
+      2) 直接命中字段对应历史记录的 counterpart 分布 → top1
+    """
+    if not cp_index:
+        return None
+    hint = (if_meta.get("counterpart_hint") or "").strip()
+    if hint and hint in cp_index:
+        return hint
+    # 由直接命中反推：用候选的 ifs 列表作为线索查 counterpart
+    ifids: set[str] = set()
+    for _, cands in direct_pairs:
+        for c in cands[:3]:
+            ifs_raw = c.get("ifs")
+            if not ifs_raw:
+                continue
+            if isinstance(ifs_raw, set):
+                ifids.update(ifs_raw)
+            else:
+                ifids.update(str(ifs_raw).split(","))
+    ifids = {x.strip() for x in ifids if x and x.strip()}
+    if not ifids:
+        return None
+    placeholders = ",".join("?" * len(ifids))
+    rows = kb.execute(
+        f"SELECT counterpart_system, COUNT(*) AS n FROM field_mappings "
+        f"WHERE ifid IN ({placeholders}) AND counterpart_system IS NOT NULL "
+        f"GROUP BY counterpart_system ORDER BY n DESC LIMIT 1",
+        list(ifids),
+    ).fetchall()
+    if not rows:
+        return None
+    cp = rows[0][0]
+    return cp if cp in cp_index else None
+
+
+def _read_counterpart_card(kb_path: Path, cp_index: dict[str, str], cp_name: str) -> str | None:
+    fname = cp_index.get(cp_name)
+    if not fname:
+        return None
+    p = kb_path.parent / "counterparts" / fname
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _build_book_field_summary(
@@ -1213,6 +1289,17 @@ def main() -> int:
 
     # 为 AI 推测准备本书字段分布摘要
     book_field_summary = _build_book_field_summary(fields, direct_pairs, business_dict)
+
+    # 选定対向系统画像卡片，注入 if_meta 供 AI 推测使用
+    cp_index = _load_counterpart_index(kb_path)
+    cp_picked = _pick_counterpart(if_meta, direct_pairs, kb, cp_index)
+    if cp_picked:
+        card = _read_counterpart_card(kb_path, cp_index, cp_picked)
+        if card:
+            if_meta["_counterpart_card"] = card
+            if_meta["_counterpart_card_name"] = cp_picked
+            print(f"対向系统画像注入：{cp_picked}", file=sys.stderr)
+
     enable_ai = os.environ.get("IF_MAP_DISABLE_AI") != "1"
     if enable_ai:
         print(f"AI 推测启用（{sum(1 for _,d in direct_pairs if not d and not _.get('skip'))} 个字段候选 AI 推测，每字段 ≤{AI_TIMEOUT_SEC}s）", file=sys.stderr)

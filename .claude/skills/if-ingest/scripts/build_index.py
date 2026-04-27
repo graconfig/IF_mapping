@@ -23,6 +23,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_mapping import extract_file, load_config  # noqa: E402
+from build_counterpart_cards import build_cards  # noqa: E402
 
 # 项目根：以调用方 CWD 为准，允许 skill 从任何位置调用时仍能定位到项目的 projects/<name>/
 ROOT = Path.cwd()
@@ -171,6 +172,9 @@ def main() -> int:
     out_report.write_text("\n".join(lines), encoding="utf-8")
     print(f"wrote report → {out_report}")
     print(f"wrote sqlite → {out_db}")
+
+    cp_index = build_cards(out_db, out_dir / "counterparts")
+    print(f"wrote {len(cp_index)} counterpart cards → {out_dir / 'counterparts'}")
     print()
     print(
         f"records: {stats['total_records']} | w/ sap_tech: {stats['with_sap_tech']} | "
