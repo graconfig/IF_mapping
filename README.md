@@ -21,8 +21,12 @@ IF_mapping/
 │       ├── knowledge/                  # 知识库产物
 │       │   ├── field_mappings.jsonl   # 字段映射主库
 │       │   ├── ifs.db                 # SQLite 索引
-│       │   └── extract_report.md      # 抽取统计
-│       └── fill_out/                   # 空白设计书 + 产物
+│       │   ├── extract_report.md      # 抽取统计
+│       │   └── counterparts/          # 对向系统画像卡片
+│       │       ├── _index.json        # counterpart 名 → 卡片文件
+│       │       └── <counterpart>.md   # 单系统画像（Top 表/字段指纹/类型惯例）
+│       ├── input/                      # 待映射的空白设计书 + 产物
+│       └── fill_out/                   # 已完成审阅的空白设计书 + 产物
 │           ├── RS020_xxx.xls          # 输入
 │           ├── RS020_xxx.schema.yaml  # 输入格式（自动探测）
 │           └── RS020_xxx_候选.xlsx    # 产物（带下拉、信心、说明）
@@ -32,7 +36,8 @@ IF_mapping/
     │   └── scripts/
     │       ├── detect_schema.py       # 参考文档格式自动探测
     │       ├── extract_mapping.py     # 单文件字段映射抽取
-    │       └── build_index.py         # 批量建 jsonl + sqlite
+    │       ├── build_index.py         # 批量建 jsonl + sqlite + 对向画像
+    │       └── build_counterpart_cards.py  # 按对向系统聚合输出画像卡片
     └── if-map/                         # 空白设计书回填
         ├── SKILL.md
         └── scripts/

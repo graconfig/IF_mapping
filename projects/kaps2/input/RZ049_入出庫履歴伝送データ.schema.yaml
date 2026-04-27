@@ -1,0 +1,26 @@
+# 自动探测生成 — 请人工复核
+# 样本工作表：入出庫履歴伝送データ
+# 检出字段语义列：{'no': 1, 'name': 3, 'tech': 4, 'type': 5, 'length': 6, 'remark': 11}
+
+sheet: 入出庫履歴伝送データ
+header_row: 2
+data_start_row: 3
+columns:
+  ext_no: A
+  ext_name: C
+  ext_tech: D
+  ext_type: E
+  ext_len: F
+  remark: K
+skip:
+  names:
+  - 予備
+  techs:
+  - FIL1
+  - FIL2
+  - FIL3
+if_meta:
+  ifid_guess: ''
+  if_name: 入出庫履歴伝送データ
+  direction: external_to_sap
+  counterpart_hint: null

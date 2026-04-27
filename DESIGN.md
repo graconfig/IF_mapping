@@ -105,6 +105,31 @@ python3 build_index.py --project kaps2
 ```
 
 扫 `sources/` 下每份 xlsx，调 extract_mapping，合并写入 `knowledge/`。SQLite 有 6 个索引，查询毫秒级。
+末尾自动调 `build_counterpart_cards.py` 生成对向系统画像（见下）。
+
+### 2.5 对向系统画像 `build_counterpart_cards.py`（if-ingest）
+
+按 `counterpart_system` 聚合 `field_mappings`，为每个对向系统生成一张 markdown 画像：
+
+- **总览**：历史接口数 / 字段总数 / 已确定 SAP 映射数 / 业务方向分布
+- **历史接口 Top 10**：IFID + 业务名（让 AI 知道这个系统都做过哪些业务）
+- **主要 SAP 表**：按字段次数降序（先验"该系统通常落在 VBRK/VBRP 家族"）
+- **高频字段指纹（≥2 次）**：稳定的 `ext_name → struct.tech ×freq [IFIDs]`，是该系统语义稳定性的证据
+- **类型/长度惯例**：日付字段（C(8) YYYYMMDD）、時刻字段（C(6) HHMMSS）等格式约定
+
+产出：`projects/<name>/knowledge/counterparts/<safe>.md` + `_index.json`（counterpart 名 → 文件）。
+
+**与 business_dict 的分工**：
+
+| 维度 | business_dict | 对向画像 |
+|---|---|---|
+| 来源 | 手写 | 自动聚合知识库 |
+| 范围 | 跨系统通用 | 单系统特化 |
+| 形式 | regex 规则 + 抽象建议 | 具体 ext_name 指纹 + 频次证据 |
+| 用途 | 语义归因（"含数 → 数量族"）| 先验收敛（"该系统主要落 VBRK/VBRP"）|
+| 维护 | 用户/维护者 | 摄取时自动重建 |
+
+二者互补：dict 覆盖知识库未见的语义，画像把 AI 视野收敛到该系统的历史习惯。
 
 ### 3. 回填器 `fill_book.py`（if-map）
 
@@ -122,13 +147,16 @@ python3 build_index.py --project kaps2
 
 ### AI 推测（首选，`[AI推测]` 前缀）
 
-单字段调 `claude -p` 子进程（不需 API key），每个字段喂 5 类上下文：
+单字段调 `claude -p` 子进程（不需 API key），每个字段喂 6 类上下文：
 
 1. **字段完整信息**：ext_name / ext_tech / 类型 / 长度 / 字节 / 备注（备注常含 PIC 定义、格式提示、复合字段线索）
 2. **本接口业务场景**：IFID / 业务名 / 方向 / 对向系统
 3. **本书已确定的字段分布**：本书直接命中 + 业务词典推测的字段聚集在哪些 SAP 结构（最关键上下文——告诉 AI "本书在讨论出荷而非受注"）
 4. **检索辅助**：关键词历史命中（知识库 ext_name LIKE 匹配）+ 业务词典规则候选 + 本书 Top 结构下的常见字段
-5. **任务规约**：返回 Top-3 SAP 候选 JSON（含 confidence + reason），或判定 skip=true 配原因
+5. **对向系统业务画像**：选定 counterpart 的画像卡片（Top 表 / 字段指纹 / 类型惯例），让 AI 借历史先验收敛候选
+6. **类型与长度约束 + 任务规约**：明确 C(短)/C(长)/QUAN/CURR 兼容规则；返回 Top-3 SAP 候选 JSON（含 confidence + reason），或判定 skip=true 配原因
+
+**画像选定**：优先 `if_meta.counterpart_hint` 精确匹配；否则用本书 Pass1 直接命中的 ifids 反查 `field_mappings` 取分布最高的 counterpart；都缺时不注入。
 
 AI 给出候选自带 0-1 confidence，显示档位 `★★（AI推测）` / `★（AI推测）` / `AI推测 需复核`；说明列展示 AI 给的 reason + 备选。信心度封顶 `★★`（低于历史直接映射的 `★★★`）。
 
@@ -220,6 +248,7 @@ projects/<name>/business_dict.yaml      ← 项目特有补充（可选）
 | 默认词典 + 项目词典合并 | 仅项目词典 / 仅默认词典 | 通用 SAP 语义（数量/重量/日期）跨项目一致；项目特殊规则可覆盖 |
 | 推测类候选独立前缀 `[推测]` | 混在历史候选里 | 让用户一眼区分"历史验证过"和"AI 推测"，避免过度信任 |
 | L2 上下文仅加分不独立召回 | L2 独立产生候选 | 历史版本曾因 L2 独立召回，让高频主键 VBAP.MATNR 刷到所有推测字段 |
+| 对向画像自动生成而非手写 | 维护者撰写 | 19 个系统手写维护成本高且会漂移；自动聚合零维护、永远跟数据同步；语义性不足由 business_dict 补 |
 | 产物 Excel 不改原文件 | 就地修改 | 原 .xls 不破坏；.xlsx 产物可二次编辑 |
 | 下拉菜单列字符串 | 多列分别下拉 | 用户操作简单；`"VBAK.KUNNR（受注先）"` 一条字符串自解释 |
 
@@ -250,5 +279,6 @@ score = weighted_freq / total_weighted + (0.15 if ctx_struct_match else 0)
 
 - 字典外置化：把 `field_semantics` 也外置为 yaml（当前 hardcoded 在 `detect_schema.py`）
 - 知识库 Embedding：为 ext_name/sap_name 生成向量，支持语义近邻查询（超越子串匹配）
+- 对向画像兜底匹配：当本书 0 直接命中（如 RT005 / 全新系统）时，按 IFID 前缀或 IF 名字面相似度兜底选画像，让首次接触的对向系统也能享受先验
 - 多项目联合：跨项目共享"SAP 通用语义"层，每个项目保留自己的"外部系统特化"层
 - 反馈闭环：用户在候选 Excel 里勾选的结果可回流到知识库，增量学习
