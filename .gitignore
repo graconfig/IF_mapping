@@ -3,9 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# 生成物（由 scripts/build_index.py 重建）
-projects/*/knowledge/field_mappings.jsonl
-projects/*/knowledge/ifs.db
+# 知识库产物（已纳入 git 作为快照，方便在没有 sources/ 的环境直接跑 if-map）
 projects/*/knowledge/pilot/
 
 # 临时
