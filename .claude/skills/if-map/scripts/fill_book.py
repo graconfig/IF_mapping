@@ -689,16 +689,16 @@ def _build_ai_prompt(
     parts += [
         "",
         "## 类型与长度约束（重要 — 候选字段必须类型兼容）",
-        "- C(1-5) 短字符：通常为**代码/区分/フラグ/タイプ/状态**；映到 SAP 的 CHAR 短字段"
-        "（如 LVORM、SPART、AUART、WERKS、LFART 等）。**严禁**映到 QUAN 数量字段"
-        "（LFIMG/KWMENG/MENGE 精度 13+3）——哪怕备注写『PIC \"999\" 符号なし』，"
-        "SAP 数量字段为精确数值设计；短 C 字段表示的『数』多为 API 聚合的件数统计，应判 skip。",
+        "- C(1-5) 短字符：默认推断为**代码/区分/フラグ/タイプ/状态**，映到 SAP 的 CHAR 短字段"
+        "（如 LVORM、SPART、AUART、WERKS、LFART 等）。",
         "- C(6-10)：多为编码/ID（注番、品番、伝票番号、得意先コード）。",
         "- C(>10)：多为名称/说明/URL/描述文本。",
         "- C(6) 且备注含 YYMMDD、或 C(8) 含 YYYYMMDD：日期，SAP 用 DATS(8)。",
         "- C(6) 且备注含 HHMMSS：时刻，SAP 用 TIMS(6)。",
-        "- 真正的『数量/金額』：SAP 是 QUAN/CURR（精度大），要求接口侧用足够精度的类型（通常 P 型或长 N 型），"
-        "短 C 字段不兼容；此时宁可 skip=true（判为 API 聚合计数值）也不要强塞 LFIMG/KWMENG。",
+        "- **数量/金額字段的特殊判定**：若字段名含『数量/数/金額/重量』且**优先表中有同语义的 QUAN/CURR 字段**"
+        "（如 MATDOC.MENGE / LIPS.LFIMG / VBAP.KWMENG / RBKP.RMWWR），则即使接口侧类型为 C(短)"
+        "也**应推该 QUAN/CURR 字段** —— 接口侧 C 是 PIC 编码后的字符表示，由变换层转回数值；"
+        "此时不要 skip。仅当字段名为『口数/件数/個数』等明显的『API 聚合计数』词汇且优先表无对应字段时才 skip。",
         "- 若所有候选类型/长度都不兼容，返回 skip=true 并说明原因。",
         "",
         "## 任务",
@@ -916,6 +916,9 @@ def resolve_candidates(
 
     skip_reason = check_skip_patterns(field.get("ext_name"), business_dict)
     direct = pass1_candidates(field, kb, norm_index)
+    # 跨多个 SAP 表的历史命中视为模糊，不当作直接命中（与 main pass1 同规则）
+    if direct and len({c["sap_struct"] for c in direct}) > 1:
+        direct = []
     if direct:
         return direct, None
     if skip_reason:
@@ -1299,10 +1302,17 @@ def main() -> int:
     struct_dict = build_struct_field_dict(kb)
 
     # Pass 1：先对每个字段做直接命中（不含推测），用于构建上下文聚集
-    direct_pairs = [
-        (f, pass1_candidates(f, kb, norm_index) if not f.get("skip") else [])
-        for f in fields
-    ]
+    # 历史命中跨多个 SAP 表（语义模糊）的字段视为「无直接命中」，转 AI 推测路径
+    # —— 这类字段同时不进入 priority_structs，避免给后续字段错误先验
+    direct_pairs = []
+    for f in fields:
+        if f.get("skip"):
+            direct_pairs.append((f, []))
+            continue
+        cands = pass1_candidates(f, kb, norm_index)
+        if cands and len({c["sap_struct"] for c in cands}) > 1:
+            cands = []
+        direct_pairs.append((f, cands))
     ctx = context_structs(direct_pairs)
     ctx_structs = [s for s, _ in ctx.most_common(5)]
 
