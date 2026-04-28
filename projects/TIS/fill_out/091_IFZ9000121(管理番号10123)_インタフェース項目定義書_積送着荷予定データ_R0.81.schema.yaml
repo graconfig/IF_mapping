@@ -1,0 +1,24 @@
+# 反向布局：左=部品SAP（要填的目标）/右=倉庫システム（源）
+# 把 ext_* 切到右块（cols 9-14），方向改为 sap_to_external
+
+sheet: 項目マッピング
+header_row: 6
+data_start_row: 7
+columns:
+  ext_no: I
+  ext_name: J
+  ext_tech: L
+  ext_len: M
+  ext_type: N
+skip:
+  names:
+  - 予備
+  techs:
+  - FIL1
+  - FIL2
+  - FIL3
+if_meta:
+  ifid_guess: IFZ9000121
+  if_name: 積送着荷予定データ
+  direction: sap_to_external
+  counterpart_hint: 倉庫システム
