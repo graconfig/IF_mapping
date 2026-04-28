@@ -228,13 +228,18 @@ def read_blank_book(xlsx_path: Path, schema: dict) -> tuple[list[dict], dict]:
             continue
         empty_run = 0
 
-        # ext_no 逻辑：若 schema 声明且为非数字（页脚特征），停止；否则自动递增
+        # ext_no 逻辑：若 schema 声明且非合法编号（页脚特征），停止；否则自动递增
+        # 合法编号：纯数字 / 单字母+数字（如 S010 / A010）
         if has_ext_no:
             no_val = rec.get("ext_no")
             if no_val is None:
                 continue
-            if not (isinstance(no_val, (int, float)) or str(no_val).strip().isdigit()):
-                break  # 末尾页脚
+            if isinstance(no_val, (int, float)):
+                pass
+            else:
+                s = str(no_val).strip()
+                if not (s.isdigit() or re.match(r"^[A-Za-z]\d+$", s)):
+                    break  # 末尾页脚
         else:
             auto_no += 1
             rec["ext_no"] = str(auto_no)
