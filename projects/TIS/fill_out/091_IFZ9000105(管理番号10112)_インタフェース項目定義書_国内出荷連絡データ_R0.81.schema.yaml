@@ -1,0 +1,26 @@
+# 自动探测生成 — 请人工复核
+# 样本工作表：項目マッピング
+# 检出字段语义列：{'no': 1, 'name': 2, 'struct': 3, 'tech': 4, 'length': 5, 'type': 6}
+
+sheet: 項目マッピング
+header_row: 6
+data_start_row: 7
+columns:
+  ext_no: A
+  ext_name: B
+  struct: C
+  ext_tech: D
+  ext_len: E
+  ext_type: F
+skip:
+  names:
+  - 予備
+  techs:
+  - FIL1
+  - FIL2
+  - FIL3
+if_meta:
+  ifid_guess: IFZ9000105
+  if_name: 国内出荷連絡データ
+  direction: external_to_sap
+  counterpart_hint: 倉庫システム
