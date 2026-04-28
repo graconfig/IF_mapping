@@ -639,6 +639,9 @@ def _build_ai_prompt(
         for e in entries:
             struct_field_lines.append(f"    · {s}.{e['sap_tech']}（{e.get('sap_name') or ''}）")
 
+    # 直接命中过的 SAP 表（提取自 book_field_summary，作为强先验）
+    priority_structs = sorted({r.get("sap_struct") for r in resolved if r.get("sap_struct")})
+
     # ---- 组装 prompt ----
     parts = [
         "你是 SAP 接口设计顾问。帮我为一个外部系统字段推荐对应的 SAP 表和字段。",
@@ -652,6 +655,17 @@ def _build_ai_prompt(
         "## 本接口已确定的字段分布（用于推断业务上下文）",
         *book_lines,
     ]
+    if priority_structs:
+        parts += [
+            "",
+            "## 优先表（来自本书已直接命中的 SAP 表）—— 强先验",
+            f"以下 SAP 表已被本接口的其他字段历史确认：**{', '.join(priority_structs)}**。",
+            "硬性规则：当前字段的候选**必须优先**从这些表里选；",
+            "只有当该字段语义明显与这些表所属业务模块冲突（例如金額字段映入 ADRC）时，",
+            "才换其他表。在推荐 reason 中要写明候选与这些表的关系。",
+            "理由：同一份接口设计书内的字段通常服务同一业务场景，",
+            "倾向落在相同或相邻的 SAP 表家族；若 BRNO→MATDOC.BWART，则其他字段也应优先 MATDOC 系。",
+        ]
     if kw_hits:
         parts += ["", "## 知识库中按关键词检索到的历史映射（参考）", *kw_hits]
     if dict_hits:
