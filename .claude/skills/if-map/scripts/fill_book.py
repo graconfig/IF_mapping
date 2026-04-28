@@ -388,13 +388,25 @@ def extract_keywords(name: str | None) -> list[str]:
     return kws
 
 
-def check_skip_patterns(name: str | None, business_dict: dict) -> str | None:
-    """检查 ext_name 是否命中业务词典里的 skip_reason。命中则返回 reason 字符串。"""
-    if not name:
+def check_skip_patterns(name: str | None, business_dict: dict, tech: str | None = None) -> str | None:
+    """检查 ext_name / ext_tech 是否命中业务词典里的 skip_reason。命中则返回 reason 字符串。
+    同时尝试原文 + NFKC 归一化（全角字符自动转半角，便于 regex 匹配半角变体）。"""
+    if not name and not tech:
         return None
+    candidates: list[str] = []
+    for v in (name, tech):
+        if not v:
+            continue
+        candidates.append(v)
+        nfkc = unicodedata.normalize("NFKC", v)
+        if nfkc != v:
+            candidates.append(nfkc)
     for pat in business_dict.get("patterns") or []:
-        if "skip_reason" in pat and re.search(pat["regex"], name):
-            return pat["skip_reason"]
+        if "skip_reason" not in pat:
+            continue
+        for s in candidates:
+            if re.search(pat["regex"], s):
+                return pat["skip_reason"]
     return None
 
 
@@ -895,7 +907,7 @@ def _build_book_field_summary(
             entry["sap_struct"] = top["sap_struct"]
             entry["sap_tech"] = top["sap_tech"]
             entry["sap_name"] = top.get("sap_name")
-        elif check_skip_patterns(f.get("ext_name"), business_dict):
+        elif check_skip_patterns(f.get("ext_name"), business_dict, f.get("ext_tech")):
             entry["is_skipped"] = True
         summary.append(entry)
     return summary
@@ -914,7 +926,7 @@ def resolve_candidates(
     if field.get("skip"):
         return [], "填充/占位字段，无需映射。"
 
-    skip_reason = check_skip_patterns(field.get("ext_name"), business_dict)
+    skip_reason = check_skip_patterns(field.get("ext_name"), business_dict, field.get("ext_tech"))
     direct = pass1_candidates(field, kb, norm_index)
     # 跨多个 SAP 表的历史命中视为模糊，不当作直接命中（与 main pass1 同规则）
     if direct and len({c["sap_struct"] for c in direct}) > 1:
@@ -1351,7 +1363,7 @@ def main() -> int:
                         cands = sf_direct
                         skip = None
                     else:
-                        skip = check_skip_patterns(sf.get("ext_name"), business_dict)
+                        skip = check_skip_patterns(sf.get("ext_name"), business_dict, sf.get("ext_tech"))
                         cands = [] if skip else pass1_speculate(sf, kb, business_dict, struct_dict, ctx_structs)
                         cands = _diversify_speculate(cands, limit=TOP_N) if cands else []
                     total_w = sum(c["weighted_freq"] for c in cands) or 1.0
