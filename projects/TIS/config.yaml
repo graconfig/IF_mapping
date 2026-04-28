@@ -1,0 +1,104 @@
+# 自动探测生成 — 请人工复核
+# 样本工作表：項目マッピング(発注入庫)
+# 检出字段块：left={'no': 1, 'name': 2, 'struct': 3, 'tech': 4, 'length': 5, 'type': 6}
+#           right={'no': 10, 'name': 11, 'struct': 12, 'tech': 13, 'length': 14, 'type': 15}
+# 推断 SAP 侧：right
+# [TODO] 请确认 if_meta.ifid_cell 与 if_name_cell 所在单元格
+
+name: TIS
+description: 自动生成，请人工复核
+sources_dir: sources
+out_dir: knowledge
+mapping_sheet:
+  name_regex: 項目マッピング
+  header_row: 6
+  data_start_row: 7
+  label_row: 5
+field_semantics:
+  'no':
+  - №
+  - No.
+  - 'No'
+  - 'NO'
+  - 序号
+  - 项次
+  - '#'
+  name:
+  - 項目名称
+  - 項目名
+  - Field Name
+  - Column Name
+  - 字段名称
+  - 字段名
+  - 名称
+  struct:
+  - 構造
+  - Table
+  - 表名
+  - テーブル
+  - 构造
+  - Structure
+  tech:
+  - 技術名称
+  - 技術名
+  - 項目コード
+  - Technical Name
+  - Field Code
+  - 技术名称
+  - 技术名
+  - 字段代码
+  length:
+  - 文字数
+  - 桁数
+  - バイト数
+  - Leng
+  - Length
+  - Len
+  - Byte
+  - 长度
+  - バイト
+  type:
+  - 属性
+  - Type
+  - データ型
+  - 类型
+  - 型
+target_side:
+  label_patterns:
+  - 部品\s*SAP
+  - ＳＡＰ
+aux_columns:
+  conv_spec:
+  - 変換仕様
+  conv_current:
+  - 現行編集仕様
+  sap_digits:
+  - 桁数
+  sap_code_system:
+  - コード体系
+  sap_supplement:
+  - 補足・その他
+  - 補足
+  unrealizable_no:
+  - No.
+  unrealizable_class:
+  - 分類
+  remark:
+  - 備考
+  - Remark
+  - 备注
+direction_rules:
+  sheet_suffix:
+    (受信): external_to_sap
+    (返信): sap_to_external
+  file_marker:
+    ※受信: external_to_sap
+    ※送信: sap_to_external
+  fallback_by_sap_side: true
+if_meta:
+  ifid_cell:
+  - 2
+  - 1
+  if_name_cell:
+  - 2
+  - 3
